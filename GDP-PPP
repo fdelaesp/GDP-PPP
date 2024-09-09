@@ -1,0 +1,702 @@
+---
+title: "GDP PPP"
+author: "Francisco de La Espriellla"
+date: "2024-07-22"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(patchwork)
+library(WDI)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(writexl)
+library(unhcrthemes)
+library(tidyverse)
+library(scales)
+library(ggrepel)
+```
+
+```{r}
+# List of financial indicators we are interested in
+financial_indicators <- c(
+  "NY.GDP.PCAP.PP.CD",     # GDP per capita (PPP)
+  "NE.GDI.TOTL.ZS",    # Gross Capital Formation
+  "SI.POV.SOPO", # Poverty headcount ratio at societal poverty lines (% of population)
+  "DT.DOD.DECT.GN.ZS" # External debt stocks (% of GNI)
+)
+
+countries <- c("PA", "CR")
+
+# Fetch data for the selected indicators from 2000 to 2024
+wdi_data <- WDI(indicator = financial_indicators, country = countries, start = 2000, end = 2022)
+wdi_data
+
+```
+
+```{r}
+# Function to count the number of NA values for each indicator
+count_na <- function(df) {
+  df %>%
+    summarise(across(all_of(financial_indicators), ~ sum(is.na(.)))) %>%
+    pivot_longer(everything(), names_to = "indicator", values_to = "na_count") %>%
+    arrange(na_count)
+}
+
+# Count NA values for each indicator
+na_counts <- count_na(wdi_data)
+
+# Define a threshold for acceptable NA values (e.g., less than 50% missing data)
+threshold <- 0.5 * nrow(wdi_data) / length(countries)
+
+# Select indicators with the least NA values for further analysis
+selected_indicators <- na_counts %>%
+  filter(na_count < threshold) %>%
+  pull(indicator)
+
+selected_indicators <- financial_indicators # overriding na_filtered indicators
+
+# Fetch data again with the selected indicators
+wdi_data_selected <- wdi_data %>%
+  select(country, year, all_of(selected_indicators))
+
+wdi_data_selected
+
+```
+
+
+
+
+```{r}
+# Function to count the number of NA values for each indicator
+count_na <- function(df) {
+  df %>%
+    summarise(across(all_of(financial_indicators), ~ sum(is.na(.)))) %>%
+    pivot_longer(everything(), names_to = "indicator", values_to = "na_count") %>%
+    arrange(na_count)
+}
+
+# Count NA values for each indicator
+na_counts <- count_na(wdi_data)
+
+# Define a threshold for acceptable NA values (e.g., less than 50% missing data)
+threshold <- 0.5 * nrow(wdi_data) / length(countries)
+
+# Select indicators with the least NA values for further analysis
+selected_indicators <- na_counts %>%
+  filter(na_count < threshold) %>%
+  pull(indicator)
+
+# Optionally override selected indicators with all financial indicators
+selected_indicators <- financial_indicators
+
+# Fetch data again with the selected indicators
+wdi_data_selected <- wdi_data %>%
+  select(country, year, all_of(selected_indicators))
+
+# Transform to long format
+wdi_long <- wdi_data_selected %>%
+  pivot_longer(cols = all_of(selected_indicators), names_to = "indicator", values_to = "value")
+
+# Check the resulting data
+head(wdi_long)
+unique(wdi_long$indicator)
+
+```
+
+
+
+#Perform linear regression for each indicator against year
+
+```{r}
+# Perform linear regression for each indicator against year
+regression_results <- wdi_long %>%
+  group_by(indicator) %>%
+  do(model = lm(value ~ year, data = .))
+
+# Extract regression coefficients
+regression_coefficients <- regression_results %>%
+  rowwise() %>%
+  mutate(intercept = coef(model)[1], slope = coef(model)[2]) %>%
+  select(indicator, intercept, slope)
+
+# Print regression coefficients
+print(regression_coefficients)
+
+
+```
+
+
+
+```{r}
+
+plot_gdp_vs_gcf_combined <- function(countries, data, output_dir = "plots") {
+  combined_data <- data %>%
+    filter(country %in% countries, indicator %in% c("NE.GDI.TOTL.ZS", "NY.GDP.PCAP.PP.CD"), year >= 2000) %>%
+    pivot_wider(names_from = indicator, values_from = value) %>%
+    rename(
+      Gross_Capital_Formation = `NE.GDI.TOTL.ZS`, 
+      GDP_per_Capita = `NY.GDP.PCAP.PP.CD`
+    ) %>%
+    filter(
+      !is.na(Gross_Capital_Formation) & !is.na(GDP_per_Capita) & 
+      is.finite(Gross_Capital_Formation) & is.finite(GDP_per_Capita)
+    )
+  
+  if (nrow(combined_data) == 0) {
+    message("No data available for the selected indicators and years for the specified countries.")
+    return(NULL)
+  }
+  
+  alpha <- 0.5
+  
+  # Calculate correlation for each country
+  correlation_data <- combined_data %>%
+    group_by(country) %>%
+    summarise(
+      correlation = cor(GDP_per_Capita, Gross_Capital_Formation, use = "complete.obs"),
+      .groups = 'drop'
+    )
+  
+  combined_data <- combined_data %>%
+    left_join(correlation_data, by = "country")
+  
+  # Filter data to include only even years for labels
+  even_years_data <- combined_data %>% filter(year %% 2 == 0)
+  
+  # Define colors for each country
+  country_colors <- c("Panama" = "darkblue", "Costa Rica" = "red")
+  
+  # Create the plot
+  p <- ggplot(combined_data, aes(x = GDP_per_Capita, y = Gross_Capital_Formation, color = country, group = country)) +
+    geom_segment(data = combined_data, aes(
+      x = GDP_per_Capita,
+      y = Gross_Capital_Formation,
+      xend = lead(GDP_per_Capita, default = NA),
+      yend = lead(Gross_Capital_Formation, default = NA)
+    ), color = "grey70") +
+    geom_point(size = 3) +
+    geom_text_repel(data = even_years_data, aes(label = year), size = 8 / .pt, point.padding = 5) +
+    labs(
+      title = "GDP per Capita (PPP) vs Gross Capital Formation (% of GDP)",
+      subtitle = paste(
+        "Correlation for Costa Rica: ", round(correlation_data$correlation[correlation_data$country == "Costa Rica"], 2),
+        "\nCorrelation for Panama: ", round(correlation_data$correlation[correlation_data$country == "Panama"], 2),
+        sep = ""
+      ),
+      x = "GDP per Capita (PPP)",
+      y = "Gross Capital Formation (% of GDP)",
+      caption = "Source: World Development Indicators\n© UNHCR, The UN Refugee Agency"
+    ) +
+    theme_unhcr(
+      grid = "XY",
+      axis = FALSE,
+      axis_title = "xy"
+    ) +
+    scale_color_manual(values = country_colors) +
+    guides(color = guide_legend(title = "Country"))
+  
+  # Print the plot
+  print(p)
+  
+  # Save the combined plot
+  file_name <- "combined_gdp_vs_gcf.jpeg"
+  file_path <- file.path(output_dir, file_name)
+  
+  # Ensure the output directory exists
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    print(paste("Created output directory:", output_dir))
+  }
+  
+  print(paste("Saving combined plot to:", file_path))
+  ggsave(file_path, plot = p, width = 10, height = 8, dpi = 300)
+  print(paste("Combined plot saved to:", file_path))
+}
+
+# Example usage with Costa Rica and Panama only
+countries <- c("Costa Rica", "Panama")
+
+# Create output directory if it doesn't exist
+output_dir <- "plots"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Generate and save the combined plot
+plot_gdp_vs_gcf_combined(countries, wdi_long, output_dir)
+```
+
+
+
+
+```{r}
+plot_gdp_vs_poverty_combined <- function(countries, data, output_dir = "plots") {
+  combined_data <- data %>%
+    filter(country %in% countries, indicator %in% c("SI.POV.SOPO", "NY.GDP.PCAP.PP.CD"), year >= 2000) %>%
+    pivot_wider(names_from = indicator, values_from = value) %>%
+    rename(
+      Poverty_Headcount_Ratio = `SI.POV.SOPO`, 
+      GDP_per_Capita = `NY.GDP.PCAP.PP.CD`
+    ) %>%
+    filter(
+      !is.na(Poverty_Headcount_Ratio) & !is.na(GDP_per_Capita) & 
+      is.finite(Poverty_Headcount_Ratio) & is.finite(GDP_per_Capita)
+    )
+  
+  if (nrow(combined_data) == 0) {
+    message("No data available for the selected indicators and years for the specified countries.")
+    return(NULL)
+  }
+  
+  alpha <- 0.5
+  
+  # Calculate correlation for each country
+  correlation_data <- combined_data %>%
+    group_by(country) %>%
+    summarise(
+      correlation = cor(GDP_per_Capita, Poverty_Headcount_Ratio, use = "complete.obs"),
+      .groups = 'drop'
+    )
+  
+  combined_data <- combined_data %>%
+    left_join(correlation_data, by = "country")
+  
+  # Order data by year within each country
+  combined_data <- combined_data %>%
+    arrange(country, year)
+  
+  # Filter data to include only even years for labels
+  even_years_data <- combined_data %>% filter(year %% 2 == 0)
+  
+  # Define colors for each country
+  country_colors <- c("Panama" = "darkblue", "Costa Rica" = "red")
+  
+  # Create the plot
+  p <- ggplot(combined_data, aes(x = GDP_per_Capita, y = Poverty_Headcount_Ratio, color = country, group = country)) +
+    geom_segment(aes(
+      xend = lead(GDP_per_Capita, default = NA),
+      yend = lead(Poverty_Headcount_Ratio, default = NA)
+    ), color = "grey70") +
+    geom_point(size = 3) +
+    geom_text_repel(data = even_years_data, aes(label = year), size = 8 / .pt, point.padding = 5) +
+    labs(
+      title = "GDP per Capita (PPP) vs Poverty Headcount Ratio (% of Population)",
+      subtitle = paste(
+        "Correlation for Costa Rica: ", round(correlation_data$correlation[correlation_data$country == "Costa Rica"], 2),
+        "\nCorrelation for Panama: ", round(correlation_data$correlation[correlation_data$country == "Panama"], 2),
+        sep = ""
+      ),
+      x = "GDP per Capita (PPP)",
+      y = "Poverty Headcount Ratio (% of Population)",
+      caption = "Source: World Development Indicators\n© UNHCR, The UN Refugee Agency"
+    ) +
+    theme_unhcr(
+      grid = "XY",
+      axis = FALSE,
+      axis_title = "xy"
+    ) +
+    scale_color_manual(values = country_colors) +
+    guides(color = guide_legend(title = "Country"))
+  
+  # Print the plot
+  print(p)
+  
+  # Save the combined plot
+  file_name <- "combined_gdp_vs_poverty.jpeg"
+  file_path <- file.path(output_dir, file_name)
+  
+  # Ensure the output directory exists
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    print(paste("Created output directory:", output_dir))
+  }
+  
+  print(paste("Saving combined plot to:", file_path))
+  ggsave(file_path, plot = p, width = 10, height = 8, dpi = 300)
+  print(paste("Combined plot saved to:", file_path))
+}
+
+# Example usage with Costa Rica and Panama only
+countries <- c("Costa Rica", "Panama")
+
+# Create output directory if it doesn't exist
+output_dir <- "plots"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Generate and save the combined plot
+plot_gdp_vs_poverty_combined(countries, wdi_long, output_dir)
+
+```
+
+
+#modificacion JN
+```{r}
+
+data_path <- "DebtSPNF.csv"
+output_dir <- "plots"
+
+# Check if the data path is correct
+if (!file.exists(data_path)) {
+  stop("Error: The file does not exist at the specified path.")
+}
+
+```
+
+
+```{r}
+# Read the data from CSV file
+
+dataDebt <- tryCatch({
+  read_csv(data_path)
+}, error = function(e) {
+  stop("Error reading CSV file: ", e$message)
+})
+
+dataDebt
+
+# Print column names and first few rows to debug
+print("Column names:")
+print(colnames(dataDebt))
+print("First few rows of data:")
+print(head(dataDebt))
+
+# Ensure column names are syntactically valid
+colnames(dataDebt) <- make.names(colnames(dataDebt), unique = TRUE)
+```
+
+
+
+```{r}
+# Ensure that the column names and data types are correctly set
+print("Data types of columns before mutation:")
+print(sapply(dataDebt, class))
+
+# Check if 'year' is indeed a column and is not conflicting with any other object
+print("Column names:")
+print(colnames(dataDebt))
+```
+
+
+--------------------------------------------------------------------
+#checking datasets
+```{r}
+
+dataDebt <- DebtSPNF
+dataDebt
+
+summary(dataDebt)
+wdi_long
+
+```
+
+#merging datasets
+```{r}
+names(dataDebt) <- c("country", "year", "debt")
+
+# Merge the datasets
+combined_data <- merge(dataDebt, wdi_long, by = c("country", "year"))
+
+# Rename the columns as requested
+names(merged_data)[names(merged_data) == "value.x"] <- "debt"
+names(merged_data)[names(merged_data) == "value.y"] <- "value"
+
+# View the merged data
+print(merged_data)
+
+```
+
+#plotting
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+plot_debt_vs_gdp_combined <- function(countries, combined_data, output_dir = "plots") {
+  # Ensure 'combined_data' contains the necessary columns
+  required_columns <- c("country", "year", "debt", "indicator", "value")
+  missing_columns <- setdiff(required_columns, colnames(combined_data))
+  if (length(missing_columns) > 0) {
+    stop("The dataset is missing the following required columns: ", paste(missing_columns, collapse = ", "))
+  }
+
+  # Process data
+  process_data <- function(data) {
+    # Filter to only include rows where the indicator is NY.GDP.PCAP.PP.CD
+    data <- data %>%
+      filter(indicator == "NY.GDP.PCAP.PP.CD") %>%
+      mutate(
+        year = as.integer(year),
+        NY.GDP.PCAP.PP.CD = as.numeric(value),
+        Debt_SPNF = as.numeric(debt)
+      ) %>%
+      filter(country %in% countries, year >= 2000) %>%
+      filter(
+        !is.na(Debt_SPNF) & !is.na(NY.GDP.PCAP.PP.CD) & 
+        is.finite(Debt_SPNF) & is.finite(NY.GDP.PCAP.PP.CD)
+      )
+    return(data)
+  }
+  
+  processed_data <- process_data(combined_data)
+  
+  # Calculate correlation for each country
+  correlation_data <- processed_data %>%
+    group_by(country) %>%
+    summarise(
+      correlation = cor(NY.GDP.PCAP.PP.CD, Debt_SPNF, use = "complete.obs"),
+      .groups = 'drop'
+    )
+  
+  # Join correlation data with the processed data
+  processed_data <- processed_data %>%
+    left_join(correlation_data, by = "country") %>%
+    arrange(country, year)
+  
+  # Filter data to include only even years for labels
+  even_years_data <- processed_data %>% filter(year %% 2 == 0)
+  
+  # Define colors for each country
+  country_colors <- c("Panama" = "darkblue", "Costa Rica" = "red")
+  
+  # Create the plot
+  p <- ggplot(processed_data, aes(x = NY.GDP.PCAP.PP.CD, y = Debt_SPNF, color = country, group = country)) +
+    geom_segment(aes(
+      xend = lead(NY.GDP.PCAP.PP.CD, default = NA),
+      yend = lead(Debt_SPNF, default = NA)
+    ), color = "grey70") +
+    geom_point(size = 3) +
+    geom_text_repel(data = even_years_data, aes(label = year), size = 8 / .pt, point.padding = 5) +
+    labs(
+      title = "GDP per Capita (PPP) vs Public debt (NFPS) as a % of GDP",
+      subtitle = paste(
+        "Correlation for Costa Rica: ", round(correlation_data$correlation[correlation_data$country == "Costa Rica"], 2),
+        "\nCorrelation for Panama: ", round(correlation_data$correlation[correlation_data$country == "Panama"], 2),
+        sep = ""
+      ),
+      x = "GDP per Capita (PPP)",
+      y = "Public debt (NFPS) as a % of GDP",
+      caption = "Source: World Development Indicators\n© UNHCR, The UN Refugee Agency \n & CEPAL Datos y Estadisticas"
+    ) +
+    theme_minimal() +
+    scale_color_manual(values = country_colors) +
+    guides(color = guide_legend(title = "Country"))
+  
+  # Print the plot
+  print(p)
+  
+  # Save the combined plot
+  file_name <- "combined_debt_vs_gdp.jpeg"
+  file_path <- file.path(output_dir, file_name)
+  
+  # Ensure the output directory exists
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    print(paste("Created output directory:", output_dir))
+  }
+  
+  print(paste("Saving combined plot to:", file_path))
+  ggsave(file_path, plot = p, width = 10, height = 8, dpi = 300)
+  print(paste("Combined plot saved to:", file_path))
+}
+
+# Example usage with Costa Rica and Panama only
+countries <- c("Costa Rica", "Panama")
+
+# Create output directory if it doesn't exist
+output_dir <- "plots"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Assuming combined_data is already loaded
+plot_debt_vs_gdp_combined(countries, combined_data, output_dir)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+
+
+
+
+
+```{r}
+
+lplot_debt_vs_gdp_combined <- function(countries, data_path, output_dir = "plots") {
+  # Check if the data path is correct
+  if (!file.exists(data_path)) {
+    stop("Error: The file does not exist at the specified path.")
+  }
+  
+    data <- tryCatch({
+    read_csv(data_path)
+  }, error = function(e) {
+    stop("Error reading CSV file: ", e$message)
+  })
+    
+    
+      # Ensure column names are syntactically valid
+  colnames(data) <- make.names(colnames(data), unique = TRUE)
+  
+  # Check if 'year' column exists
+  if (!"Debt_SPNF" %in% colnames(data)) {
+    stop("'year' column is missing from the dataset. Available columns are: ", paste(colnames(data), collapse = ", "))
+  }
+  
+  
+  #WOrkingggg
+
+process_data <- function(data) {
+  # Ensure the 'year' column is character to handle any unexpected types
+  data <- data %>%
+    mutate(year = as.character(year)) %>%
+    
+    # Convert columns to appropriate types
+    mutate(
+      year = as.integer(year),
+      NY.GDP.PCAP.PP.CD = as.numeric(NY.GDP.PCAP.PP.CD),
+      Debt_SPNF = as.numeric(Debt_SPNF)
+    ) %>%
+    
+    # Filter data to include only specified countries and years
+    filter(country %in% c("Costa Rica", "Panama"), year >= 2000) %>%
+    
+    # Remove rows with missing or non-finite values in key columns
+    filter(
+      !is.na(Debt_SPNF) & !is.na(NY.GDP.PCAP.PP.CD) & 
+      is.finite(Debt_SPNF) & is.finite(NY.GDP.PCAP.PP.CD)
+    )
+  
+  
+  #Workingg Stops here
+  
+  # Check if data is available and return or stop with a message
+  if (nrow(data) == 0) {
+    message("No data available for the selected indicators and years for the specified countries.")
+    stop()
+  }
+  
+    # Calculate correlation for each country
+  correlation_data <- combined_data %>%
+    group_by(country) %>%
+    summarise(
+      correlation = cor(NY.GDP.PCAP.PP.CD, Debt_SPNF, use = "complete.obs"),
+      .groups = 'drop'
+    )
+  
+    # Join correlation data with the combined data
+   combined_data <- combined_data %>%
+    left_join(correlation_data, by = "country") %>%
+    arrange(country, year)
+   
+   # Filter data to include only even years for labels
+  even_years_data <- combined_data %>% filter(year %% 2 == 0)
+  
+  # Define colors for each country
+  country_colors <- c("Panama" = "darkblue", "Costa Rica" = "red") 
+  
+  # Create the plot
+  p <- ggplot(combined_data, aes(x = NY.GDP.PCAP.PP.CD, y = Debt_SPNF, color = country, group = country)) +
+    geom_segment(aes(
+      xend = lead(NY.GDP.PCAP.PP.CD, default = NA),
+      yend = lead(Debt_SPNF, default = NA)
+    ), color = "grey70") +
+    geom_point(size = 3) +
+    geom_text_repel(data = even_years_data, aes(label = year), size = 8 / .pt, point.padding = 5) +
+    labs(
+      title = "GDP per Capita (PPP) vs Debt SPNF",
+      subtitle = paste(
+        "Correlation for Costa Rica: ", round(correlation_data$correlation[correlation_data$country == "Costa Rica"], 2),
+        "\nCorrelation for Panama: ", round(correlation_data$correlation[correlation_data$country == "Panama"], 2),
+        sep = ""
+      ),
+      x = "GDP per Capita (PPP)",
+      y = "Debt SPNF",
+      caption = "Source: Your Data Source"
+    ) +
+    theme_minimal() +
+    scale_color_manual(values = country_colors) +
+    guides(color = guide_legend(title = "Country"))
+  
+  # Print the plot
+  
+  print(p)
+  
+    # Save the combined plot
+  file_name <- "combined_debt_vs_gdp.jpeg"
+  file_path <- file.path(output_dir, file_name)
+  
+  # Ensure the output directory exists
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    print(paste("Created output directory:", output_dir))
+  }
+  
+  print(paste("Saving combined plot to:", file_path))
+  ggsave(file_path, plot = p, width = 10, height = 8, dpi = 300)
+  print(paste("Combined plot saved to:", file_path))
+  }  
+
+}
+
+
+# Example usage with Costa Rica and Panama only
+countries <- c("Costa Rica", "Panama")
+
+# Create output directory if it doesn't exist
+output_dir <- "plots"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+data_path <- "DebtSPNF.csv"
+plot_debt_vs_gdp_combined(countries, data_path, output_dir)
+  
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
